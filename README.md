@@ -70,10 +70,10 @@ Connect multiple `VibeTransferOptionNAID` nodes to combine their influences.
 
 Use the `CharacterReferenceOptionNAID` node to guide the generation using a single reference image for character identity and/or style.
 
-![image](https://github.com/user-attachments/assets/9f21eff1-163e-49f4-9e4a-85ea25b29988) <!-- Placeholder for actual image -->
+![image](https://github.com/user-attachments/assets/9f21eff1-163e-49f4-9e4a-85ea25b29988)
 
-- **style_aware:** If enabled, it attempts to copy both the character's features and the artistic style.
-- **fidelity:** Controls how strictly the generation should adhere to the reference image.
+-   **style_aware:** If enabled, it attempts to copy both the character's features and the artistic style.
+-   **fidelity:** Controls how strictly the generation should adhere to the reference image. The developers state that `primary_strength` is always kept at `1.0`, while `secondary_strength` is calculated as $1.0 - \text{fidelity}$.
 
 **Note:** The reference image will be automatically letterboxed to an accepted NAI canvas size to preserve its aspect ratio.
 
