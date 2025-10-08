@@ -235,7 +235,7 @@ class CharacterReferenceOption:
                     "tooltip": "Copy style along with identity."
                 }),
                 "fidelity": ("FLOAT", {
-                    "default": 0.65,
+                    "default": 1.0,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
@@ -432,18 +432,15 @@ class GenerateNAID:
                 ref = option["character_reference_single"]
                 style_aware = ref["style_aware"]
                 fidelity = ref["fidelity"]
-                # Backend requires EXACT 1.0
                 info_extracted = 1.0
+                primary_strength = 1.0
+                secondary_strength = 1.0 - fidelity
 
                 # Determine base_caption & strengths
                 if style_aware:
                     base_caption = "character&style"
-                    primary_strength = fidelity
-                    secondary_strength = fidelity
                 else:
                     base_caption = "character"
-                    primary_strength = fidelity
-                    secondary_strength = fidelity
 
                 # Prepare padded image to accepted CR canvas
                 ref_img = ref["image"]
