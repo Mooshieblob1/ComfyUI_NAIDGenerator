@@ -151,4 +151,4 @@ V4BasePrompt -----> positive
 V4NegativePrompt -> negative
 ```
 
-**Note:** Basic `img2img` and `inpainting` functionality works with V4/V4.5.
+**Note:** Basic `img2img`, `vibe transfer` and `inpainting` functionality works with V4/V4.5.
