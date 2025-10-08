@@ -17,11 +17,36 @@ from PIL import Image as PILImage
 TOOLTIP_LIMIT_OPUS_FREE = "Limit image size and steps for free generation by Opus."
 
 # ------------------------------------------------------------------
-# Helper utilities (local) for Character Reference image preparation
+# Helper utilities
 # ------------------------------------------------------------------
 
 # Accepted canvas sizes (per CR guidance); we will letterbox/pad to one of these
 ACCEPTED_CR_SIZES = [(1024, 1536), (1536, 1024), (1472, 1472)]
+
+def _get_user_data(access_token, timeout=120, retry=3):
+    """Fetches user data to check Anlas balance. Now a global helper."""
+    USER_API_BASE_URL = "https://api.novelai.net"
+
+    req_mod = requests
+    if retry is not None and retry > 1:
+        retries = Retry(
+            total=retry,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
+        )
+        session = requests.Session()
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+        req_mod = session
+
+    response = req_mod.get(
+        f"{USER_API_BASE_URL}/user/data",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=timeout
+    )
+
+    response.raise_for_status()
+    return response.json()
 
 def _choose_cr_canvas(w, h):
     """Select the accepted CR canvas size whose aspect ratio is closest to the source image."""
@@ -204,54 +229,20 @@ class NetworkOption:
 # -------------------------------------------------
 
 class CharacterReferenceOption:
-    """
-    Single-image Character Reference node.
-
-    API requirement (observed): director_reference_information_extracted must be EXACTLY 1.0.
-    Inputs:
-      - image
-      - style_aware
-      - fidelity (0-1)
-
-    Mapping:
-      style_aware False:
-        base_caption = "character"
-        primary_strength = fidelity
-        secondary_strength = 0.0
-      style_aware True:
-        base_caption = "character&style"
-        primary_strength = fidelity
-        secondary_strength = fidelity
-    """
-    INFO_EXTRACT_DEFAULT = 1.0  # Required by backend
-
+    INFO_EXTRACT_DEFAULT = 1.0
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "style_aware": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Copy style along with identity."
-                }),
-                "fidelity": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.01,
-                    "display": "number",
-                    "tooltip": "How strictly to match the character (and style if enabled)."
-                }),
+                "style_aware": ("BOOLEAN", {"default": True, "tooltip": "Copy style along with identity."}),
+                "fidelity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display": "number", "tooltip": "How strictly to match the character (and style if enabled)."}),
             },
-            "optional": {
-                "option": ("NAID_OPTION",),
-            }
+            "optional": {"option": ("NAID_OPTION",),}
         }
-
     RETURN_TYPES = ("NAID_OPTION",)
     FUNCTION = "set_option"
     CATEGORY = "NovelAI"
-
     def set_option(self, image, style_aware, fidelity, option=None):
         option = copy.deepcopy(option) if option else {}
         fidelity = max(0.0, min(1.0, fidelity))
@@ -306,22 +297,12 @@ class GenerateNAID:
 
         req_mod = requests
         if retry is not None and retry > 1:
-            retries = Retry(
-                total=retry,
-                backoff_factor=1,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["POST"]
-            )
+            retries = Retry(total=retry, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["POST"])
             session = requests.Session()
             session.mount("https://", HTTPAdapter(max_retries=retries))
             req_mod = session
 
-        response = req_mod.post(
-            f"{BASE_URL}/ai/generate-image",
-            json=data,
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=timeout
-        )
+        response = req_mod.post(f"{BASE_URL}/ai/generate-image", json=data, headers={"Authorization": f"Bearer {access_token}"}, timeout=timeout)
 
         if response.status_code >= 400:
             print("RAW ERROR STATUS:", response.status_code)
@@ -329,10 +310,8 @@ class GenerateNAID:
             try:
                 dbg = _copy.deepcopy(data)
                 p = dbg.get("parameters", {})
-                if "director_reference_images" in p:
-                    p["director_reference_images"] = [i[:60] + "...(trunc)" for i in p["director_reference_images"]]
-                if "reference_image_multiple" in p:
-                    p["reference_image_multiple"] = [i[:60] + "...(trunc)" for i in p["reference_image_multiple"]]
+                if "director_reference_images" in p: p["director_reference_images"] = [i[:60] + "...(trunc)" for i in p["director_reference_images"]]
+                if "reference_image_multiple" in p: p["reference_image_multiple"] = [i[:60] + "...(trunc)" for i in p["reference_image_multiple"]]
                 dbg["parameters"] = p
                 print("OUTGOING PAYLOAD (sanitized):", _json.dumps(dbg)[:2000])
             except Exception as e:
@@ -348,49 +327,17 @@ class GenerateNAID:
         width, height = calculate_resolution(width * height, (width, height))
 
         params = {
-            "params_version": 1,
-            "width": width,
-            "height": height,
-            "scale": cfg,
-            "sampler": sampler,
-            "steps": steps,
-            "seed": seed,
-            "n_samples": 1,
-            "ucPreset": 3,
-            "qualityToggle": False,
+            "params_version": 1, "width": width, "height": height, "scale": cfg, "sampler": sampler, "steps": steps,
+            "seed": seed, "n_samples": 1, "ucPreset": 3, "qualityToggle": False,
             "sm": (smea == "SMEA" or smea == "SMEA+DYN") and sampler != "ddim",
             "sm_dyn": (smea == "SMEA+DYN") and sampler != "ddim",
-            "dynamic_thresholding": decrisper,
-            # skip_cfg_above_sigma added later only if variety True
-            "controlnet_strength": 1.0,
-            "legacy": False,
-            "add_original_image": False,
-            "cfg_rescale": cfg_rescale,
-            "noise_schedule": scheduler,
-            "legacy_v3_extend": False,
-            "uncond_scale": uncond_scale,
-            "negative_prompt": negative,
-            "prompt": positive,
-            "reference_image_multiple": [],
-            "reference_information_extracted_multiple": [],
-            "reference_strength_multiple": [],
+            "dynamic_thresholding": decrisper, "controlnet_strength": 1.0, "legacy": False, "add_original_image": False,
+            "cfg_rescale": cfg_rescale, "noise_schedule": scheduler, "legacy_v3_extend": False,
+            "uncond_scale": uncond_scale, "negative_prompt": negative, "prompt": positive,
+            "reference_image_multiple": [], "reference_information_extracted_multiple": [], "reference_strength_multiple": [],
             "extra_noise_seed": seed,
-            "v4_prompt": {
-                "use_coords": False,
-                "use_order": False,
-                "caption": {
-                    "base_caption": positive,
-                    "char_captions": []
-                }
-            },
-            "v4_negative_prompt": {
-                "use_coords": False,
-                "use_order": False,
-                "caption": {
-                    "base_caption": negative,
-                    "char_captions": []
-                }
-            }
+            "v4_prompt": {"use_coords": False, "use_order": False, "caption": {"base_caption": positive, "char_captions": []}},
+            "v4_negative_prompt": {"use_coords": False, "use_order": False, "caption": {"base_caption": negative, "char_captions": []}}
         }
 
         model = "nai-diffusion-4-5-full"
@@ -421,98 +368,67 @@ class GenerateNAID:
                     params["reference_information_extracted_multiple"].append(information_extracted)
                     params["reference_strength_multiple"].append(strength)
 
-            if "model" in option:
-                model = option["model"]
+            if "model" in option: model = option["model"]
+            if "v4_prompt" in option: params["v4_prompt"].update(option["v4_prompt"])
 
-            if "v4_prompt" in option:
-                params["v4_prompt"].update(option["v4_prompt"])
-
-            # --- CHARACTER REFERENCE SINGLE INJECTION ---
             if "character_reference_single" in option:
                 ref = option["character_reference_single"]
-                style_aware = ref["style_aware"]
-                fidelity = ref["fidelity"]
-                info_extracted = 1.0
-                primary_strength = 1.0
-                secondary_strength = 1.0 - fidelity
-
-                # Determine base_caption & strengths
-                if style_aware:
-                    base_caption = "character&style"
-                else:
-                    base_caption = "character"
-
-                # Prepare padded image to accepted CR canvas
+                base_caption = "character&style" if ref["style_aware"] else "character"
                 ref_img = ref["image"]
                 _, h_raw, w_raw, _ = ref_img.shape
                 canvas_w, canvas_h = _choose_cr_canvas(w_raw, h_raw)
                 padded = pad_image_to_canvas(ref_img, (canvas_w, canvas_h))
-                b64_img = image_to_base64(padded)
+                params["director_reference_images"] = [image_to_base64(padded)]
+                params["director_reference_descriptions"] = [{"use_coords": False, "use_order": False, "legacy_uc": False, "caption": {"base_caption": base_caption, "char_captions": []}}]
+                params["director_reference_strength_values"] = [1.0]
+                params["director_reference_secondary_strength_values"] = [1.0 - ref["fidelity"]]
+                params["director_reference_information_extracted"] = [1.0]
 
-                params["director_reference_images"] = [b64_img]
-                params["director_reference_descriptions"] = [{
-                    "use_coords": False,
-                    "use_order": False,
-                    "legacy_uc": False,
-                    "caption": {
-                        "base_caption": base_caption,
-                        "char_captions": []
-                    }
-                }]
-                params["director_reference_strength_values"] = [primary_strength]
-                params["director_reference_secondary_strength_values"] = [secondary_strength]
-                params["director_reference_information_extracted"] = [info_extracted]
-
-                print("[CR DEBUG] Injected CR:",
-                      "base_caption=", base_caption,
-                      "primary=", primary_strength,
-                      "secondary=", secondary_strength,
-                      "info_extracted=", info_extracted,
-                      "canvas=", (canvas_w, canvas_h))
-            # --- END CHARACTER REFERENCE SINGLE INJECTION ---
-
-        timeout = option["timeout"] if option and "timeout" in option else None
-        retry = option["retry"] if option and "retry" in option else None
+        timeout = option.get("timeout", 120) if option else 120
+        retry = option.get("retry", 3) if option else 3
 
         if limit_opus_free:
             pixel_limit = 1024 * 1024
             if width * height > pixel_limit:
-                max_width, max_height = calculate_resolution(pixel_limit, (width, height))
-                params["width"] = max_width
-                params["height"] = max_height
-            if steps > 28:
-                params["steps"] = 28
+                params["width"], params["height"] = calculate_resolution(pixel_limit, (width, height))
+            if steps > 28: params["steps"] = 28
 
-        if variety:
-            params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"])
-
-        if sampler == "ddim" and model not in ("nai-diffusion-2"):
-            params["sampler"] = "ddim_v3"
-
-        if action == "infill" and model not in ("nai-diffusion-2"):
-            model = f"{model}-inpainting"
+        if variety: params["skip_cfg_above_sigma"] = calculate_skip_cfg_above_sigma(params["width"], params["height"])
+        if sampler == "ddim" and "nai-diffusion-2" not in model: params["sampler"] = "ddim_v3"
+        if action == "infill" and "nai-diffusion-2" not in model: model = f"{model}-inpainting"
+        
+        start_anlas = None
+        try:
+            user_data = _get_user_data(self.access_token, timeout, retry)
+            start_anlas = user_data.get("subscription", {}).get("trainingStepsLeft")
+            if start_anlas is not None: print(f"[NovelAI] Anlas (pre-gen): {start_anlas}")
+        except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-gen): {e}")
 
         image = blank_image()
         try:
             zipped_bytes = self._post_image(self.access_token, positive, model, action, params, timeout, retry)
-            zipped = zipfile.ZipFile(io.BytesIO(zipped_bytes))
-            image_bytes = zipped.read(zipped.infolist()[0])  # only support one n_samples
+            with zipfile.ZipFile(io.BytesIO(zipped_bytes)) as zipped:
+                image_bytes = zipped.read(zipped.infolist()[0])
 
-            # save original png to comfy output dir
-            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
-                "NAI_autosave", self.output_dir
-            )
+            full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path("NAI_autosave", self.output_dir)
             file = f"{filename}_{counter:05}_.png"
             d = Path(full_output_folder)
             d.mkdir(exist_ok=True)
             (d / file).write_bytes(image_bytes)
+            
+            if start_anlas is not None:
+                try:
+                    user_data_final = _get_user_data(self.access_token, timeout, retry)
+                    final_anlas = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                    if final_anlas is not None:
+                        print(f"[NovelAI] Generation cost: {start_anlas - final_anlas} Anlas")
+                        print(f"[NovelAI] Anlas (post-gen): {final_anlas}")
+                except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-gen): {e}")
 
             image = bytes_to_image(image_bytes, keep_alpha)
         except Exception as e:
-            if option and "ignore_errors" in option and option["ignore_errors"]:
-                print("ignore error:", e)
-            else:
-                raise e
+            if option and option.get("ignore_errors", False): print("ignore error:", e)
+            else: raise e
 
         return (image,)
 
@@ -521,48 +437,43 @@ class GenerateNAID:
 # -------------------------------------------------
 
 def base_augment(access_token, output_dir, limit_opus_free, ignore_errors, req_type, image, options=None):
-    image = image.movedim(-1, 1)
-    w, h = (image.shape[3], image.shape[2])
-    image = image.movedim(1, -1)
-
-    if limit_opus_free:
-        pixel_limit = 1024 * 1024
-        if w * h > pixel_limit:
-            w, h = calculate_resolution(pixel_limit, (w, h))
+    w, h = image.shape[2], image.shape[1]
+    if limit_opus_free and w * h > 1024 * 1024:
+        w, h = calculate_resolution(1024 * 1024, (w, h))
+            
+    start_anlas = None
+    try:
+        user_data = _get_user_data(access_token)
+        start_anlas = user_data.get("subscription", {}).get("trainingStepsLeft")
+        if start_anlas is not None: print(f"[NovelAI] Anlas (pre-augment): {start_anlas}")
+    except Exception as e: print(f"[NovelAI] Anlas tracking failed (pre-augment): {e}")
+            
     base64_image = image_to_base64(resize_image(image, (w, h)))
     result_image = blank_image()
     try:
-        request = {
-            "image": base64_image,
-            "req_type": req_type,
-            "width": w,
-            "height": h
-        }
-
-        if options:
-            if "defry" in options:
-                request["defry"] = options["defry"]
-            if "prompt" in options:
-                request["prompt"] = options["prompt"]
-
         zipped_bytes = augment_image(access_token, req_type, w, h, base64_image, options=options)
-        zipped = zipfile.ZipFile(io.BytesIO(zipped_bytes))
-        image_bytes = zipped.read(zipped.infolist()[0])
+        with zipfile.ZipFile(io.BytesIO(zipped_bytes)) as zipped:
+            image_bytes = zipped.read(zipped.infolist()[0])
 
-        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
-            "NAI_autosave", output_dir
-        )
+        full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path("NAI_autosave", output_dir)
         file = f"{filename}_{counter:05}_.png"
         d = Path(full_output_folder)
         d.mkdir(exist_ok=True)
         (d / file).write_bytes(image_bytes)
 
+        if start_anlas is not None:
+            try:
+                user_data_final = _get_user_data(access_token)
+                final_anlas = user_data_final.get("subscription", {}).get("trainingStepsLeft")
+                if final_anlas is not None:
+                    print(f"[NovelAI] Augment cost: {start_anlas - final_anlas} Anlas")
+                    print(f"[NovelAI] Anlas (post-augment): {final_anlas}")
+            except Exception as e: print(f"[NovelAI] Anlas tracking failed (post-augment): {e}")
+
         result_image = bytes_to_image(image_bytes)
     except Exception as e:
-        if ignore_errors:
-            print("ignore error:", e)
-        else:
-            raise e
+        if ignore_errors: print("ignore error:", e)
+        else: raise e
 
     return (result_image,)
 
@@ -572,13 +483,7 @@ class RemoveBGAugment:
         self.output_dir = folder_paths.get_output_directory()
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "ignore_errors": ("BOOLEAN", { "default": False }),
-            },
-        }
+        return {"required": {"image": ("IMAGE",), "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }), "ignore_errors": ("BOOLEAN", { "default": False }),}}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "augment"
     CATEGORY = "NovelAI/director_tools"
@@ -591,13 +496,7 @@ class LineArtAugment:
         self.output_dir = folder_paths.get_output_directory()
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "ignore_errors": ("BOOLEAN", { "default": False }),
-            },
-        }
+        return {"required": {"image": ("IMAGE",), "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }), "ignore_errors": ("BOOLEAN", { "default": False }),}}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "augment"
     CATEGORY = "NovelAI/director_tools"
@@ -610,13 +509,7 @@ class SketchAugment:
         self.output_dir = folder_paths.get_output_directory()
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "ignore_errors": ("BOOLEAN", { "default": False }),
-            },
-        }
+        return {"required": {"image": ("IMAGE",), "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }), "ignore_errors": ("BOOLEAN", { "default": False }),}}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "augment"
     CATEGORY = "NovelAI/director_tools"
@@ -629,15 +522,7 @@ class ColorizeAugment:
         self.output_dir = folder_paths.get_output_directory()
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "ignore_errors": ("BOOLEAN", { "default": False }),
-                "defry": ("INT", { "default": 0, "min": 0, "max": 5, "step": 1, "display": "number" }),
-                "prompt": ("STRING", { "default": "", "multiline": True, "dynamicPrompts": False }),
-            },
-        }
+        return {"required": {"image": ("IMAGE",), "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }), "ignore_errors": ("BOOLEAN", { "default": False }), "defry": ("INT", { "default": 0, "min": 0, "max": 5, "step": 1, "display": "number" }), "prompt": ("STRING", { "default": "", "multiline": True, "dynamicPrompts": False }),}}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "augment"
     CATEGORY = "NovelAI/director_tools"
@@ -648,24 +533,10 @@ class EmotionAugment:
     def __init__(self):
         self.access_token = get_access_token()
         self.output_dir = folder_paths.get_output_directory()
-
     strength_list = ["normal", "slightly_weak", "weak", "even_weaker", "very_weak", "weakest"]
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "ignore_errors": ("BOOLEAN", { "default": False }),
-                "mood": (["neutral", "happy", "sad", "angry", "scared",
-                     "surprised", "tired", "excited", "nervous", "thinking",
-                     "confused", "shy", "disgusted", "smug", "bored",
-                     "laughing", "irritated", "aroused", "embarrassed", "worried",
-                     "love", "determined", "hurt", "playful"], { "default": "neutral" }),
-                "strength": (s.strength_list, { "default": "normal" }),
-                "prompt": ("STRING", { "default": "", "multiline": True, "dynamicPrompts": False }),
-            },
-        }
+        return {"required": {"image": ("IMAGE",), "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }), "ignore_errors": ("BOOLEAN", { "default": False }), "mood": (["neutral", "happy", "sad", "angry", "scared", "surprised", "tired", "excited", "nervous", "thinking", "confused", "shy", "disgusted", "smug", "bored", "laughing", "irritated", "aroused", "embarrassed", "worried", "love", "determined", "hurt", "playful"], { "default": "neutral" }), "strength": (s.strength_list, { "default": "normal" }), "prompt": ("STRING", { "default": "", "multiline": True, "dynamicPrompts": False }),}}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "augment"
     CATEGORY = "NovelAI/director_tools"
@@ -680,18 +551,44 @@ class DeclutterAugment:
         self.output_dir = folder_paths.get_output_directory()
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }),
-                "ignore_errors": ("BOOLEAN", { "default": False }),
-            },
-        }
+        return {"required": {"image": ("IMAGE",), "limit_opus_free": ("BOOLEAN", { "default": True, "tooltip": TOOLTIP_LIMIT_OPUS_FREE }), "ignore_errors": ("BOOLEAN", { "default": False }),}}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "augment"
     CATEGORY = "NovelAI/director_tools"
     def augment(self, image, limit_opus_free, ignore_errors):
         return base_augment(self.access_token, self.output_dir, limit_opus_free, ignore_errors, "declutter", image)
+
+# -------------------------------------------------
+# Anlas Tracker (Visual Node)
+# -------------------------------------------------
+
+class AnlasTrackerNAID:
+    def __init__(self):
+        self.access_token = get_access_token()
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {},
+            "optional": { "trigger": ("*",) } # Allows chaining to control execution order
+        }
+
+    RETURN_TYPES = ("INT", "STRING",)
+    RETURN_NAMES = ("anlas_int", "anlas_string",)
+    FUNCTION = "get_anlas"
+    CATEGORY = "NovelAI/utils"
+    
+    def get_anlas(self, trigger=None):
+        anlas_count = 0
+        try:
+            user_data = _get_user_data(self.access_token)
+            anlas_count = user_data.get("subscription", {}).get("trainingStepsLeft", 0)
+            print(f"[NovelAI] Current Anlas Balance: {anlas_count}")
+        except Exception as e:
+            print(f"[NovelAI] Failed to fetch Anlas balance: {e}")
+            return (0, "Error fetching Anlas")
+            
+        return (anlas_count, f"{anlas_count} Anlas")
 
 # -------------------------------------------------
 # V4 Base / Negative Prompt nodes
@@ -700,12 +597,7 @@ class DeclutterAugment:
 class V4BasePrompt:
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "base_caption": ("STRING", { "multiline": True }),
-            }
-        }
-
+        return {"required": {"base_caption": ("STRING", { "multiline": True }),}}
     RETURN_TYPES = ("STRING",)
     FUNCTION = "convert"
     CATEGORY = "NovelAI/v4"
@@ -715,12 +607,7 @@ class V4BasePrompt:
 class V4NegativePrompt:
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "negative_caption": ("STRING", { "multiline": True }),
-            }
-        }
-
+        return {"required": {"negative_caption": ("STRING", { "multiline": True }),}}
     RETURN_TYPES = ("STRING",)
     FUNCTION = "convert"
     CATEGORY = "NovelAI/v4"
@@ -739,6 +626,7 @@ NODE_CLASS_MAPPINGS = {
     "VibeTransferOptionNAID": VibeTransferOption,
     "NetworkOptionNAID": NetworkOption,
     "CharacterReferenceOptionNAID": CharacterReferenceOption,
+    "AnlasTrackerNAID": AnlasTrackerNAID, # New node
     "MaskImageToNAID": ImageToNAIMask,
     "PromptToNAID": PromptToNAID,
     "RemoveBGNAID": RemoveBGAugment,
@@ -759,6 +647,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VibeTransferOptionNAID": "VibeTransferOption ✒️🅝🅐🅘",
     "NetworkOptionNAID": "NetworkOption ✒️🅝🅐🅘",
     "CharacterReferenceOptionNAID": "Character Reference ✒️🅝🅐🅘",
+    "AnlasTrackerNAID": "Anlas Tracker ✒️🅝🅐🅘", # New node
     "MaskImageToNAID": "Convert Mask Image ✒️🅝🅐🅘",
     "PromptToNAID": "Convert Prompt ✒️🅝🅐🅘",
     "RemoveBGNAID": "Remove BG ✒️🅝🅐🅘",
